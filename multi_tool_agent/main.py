@@ -202,6 +202,95 @@
 
 #     asyncio.run(main())
 ##########################################################
+# import asyncio
+# from conversation_agent import conversation_agent
+# from agent import code_generator_agent
+# from google.adk.runners import Runner
+# from google.adk.sessions import InMemorySessionService
+# from google.genai import types
+
+# APP_NAME = "File Modifier"
+# USER_ID = "user_123"
+# SESSION_ID = "conversation_session"
+
+# CODEGEN_SESSION_ID = "codegen_session_123"
+
+
+# async def send_to_agent(agent, session_service, session_id, message):
+#     """Send a message to an agent and return the final response."""
+#     runner = Runner(agent=agent, app_name=APP_NAME,
+#                     session_service=session_service)
+#     content = types.Content(role="user", parts=[types.Part(text=message)])
+#     events = runner.run(
+#         user_id=USER_ID, session_id=session_id, new_message=content)
+
+#     for event in events:
+#         if event.is_final_response():
+#             return event.content.parts[0].text
+#     return None
+
+
+# async def main():
+#     # Create persistent sessions (one for conv, one for codegen)
+#     session_service_conv = InMemorySessionService()
+#     session_service_codegen = InMemorySessionService()
+
+#     await session_service_conv.create_session(app_name=APP_NAME,
+#                                               user_id=USER_ID,
+#                                               session_id=SESSION_ID)
+#     await session_service_codegen.create_session(app_name=APP_NAME,
+#                                                  user_id=USER_ID,
+#                                                  session_id=CODEGEN_SESSION_ID)
+
+#     print("Agent will start the conversation...")
+
+#     user_input = None
+#     final_prompt = None
+
+#     while True:
+#         # -------- Clarification Loop --------
+#         while True:
+#             agent_response = await send_to_agent(
+#                 conversation_agent,
+#                 session_service_conv,
+#                 SESSION_ID,
+#                 f"User says: '{user_input}'"
+#                 if user_input
+#                 else "Start the conversation and ask what the user wants to create. "
+#                      "Ask clarifying questions as needed. When ready, produce the final prompt "
+#                      "for code generation using FINAL_PROMPT: "
+#             )
+#             print("Agent:", agent_response)
+
+#             if "FINAL_PROMPT:" in agent_response:
+#                 final_prompt = agent_response.replace(
+#                     "FINAL_PROMPT:", "").strip()
+#                 break
+#             else:
+#                 user_input = input("You: ")
+
+#         # -------- CodeGen Loop --------
+#         code_result = await send_to_agent(
+#             code_generator_agent,
+#             session_service_codegen,
+#             CODEGEN_SESSION_ID,
+#             final_prompt
+#         )
+#         print("\nCodeGen Result:\n", code_result)
+
+#         # Accept / Reject flow
+#         print("Agent: Do you accept this code or reject it?")
+#         user_choice = input("You (Accept/Reject): ").strip().lower()
+
+#         if user_choice == "accept":
+#             print("✅ Code accepted. Flow finished.")
+#             break
+#         else:
+#             user_input = input("Provide a revised description or prompt: ")
+#             final_prompt = None  # reset so clarification loop starts again
+
+# asyncio.run(main())
+
 import asyncio
 from conversation_agent import conversation_agent
 from agent import code_generator_agent
@@ -212,81 +301,103 @@ from google.genai import types
 APP_NAME = "File Modifier"
 USER_ID = "user_123"
 SESSION_ID = "conversation_session"
-
 CODEGEN_SESSION_ID = "codegen_session_123"
 
 
-async def send_to_agent(agent, session_service, session_id, message):
-    """Send a message to an agent and return the final response."""
-    runner = Runner(agent=agent, app_name=APP_NAME,
-                    session_service=session_service)
-    content = types.Content(role="user", parts=[types.Part(text=message)])
-    events = runner.run(
-        user_id=USER_ID, session_id=session_id, new_message=content)
+# Abstracting the Agent interaction into a reusable class
+class AgentRunner:
+    def __init__(self, app_name: str, session_service: InMemorySessionService):
+        self.app_name = app_name
+        self.session_service = session_service
 
-    for event in events:
-        if event.is_final_response():
-            return event.content.parts[0].text
-    return None
+    async def send_message(self, agent, session_id: str, user_id: str, message: str) -> str:
+        """Sends a message to an agent and returns the final response."""
+        runner = Runner(agent=agent, app_name=self.app_name, session_service=self.session_service)
+        content = types.Content(role="user", parts=[types.Part(text=message)])
+        events = runner.run(user_id=user_id, session_id=session_id, new_message=content)
+
+        for event in events:
+            if event.is_final_response():
+                return event.content.parts[0].text
+        return None
+
+
+# Abstracting the entire application logic into a class
+class AppOrchestrator:
+    def __init__(self, app_name: str, user_id: str):
+        self.app_name = app_name
+        self.user_id = user_id
+        self.session_service_conv = InMemorySessionService()
+        self.session_service_codegen = InMemorySessionService()
+        self.agent_runner = AgentRunner(app_name, self.session_service_conv)
+        self.agent_runner_codegen = AgentRunner(app_name, self.session_service_codegen)
+        self.conversation_agent = conversation_agent
+        self.code_generator_agent = code_generator_agent
+        self.session_id = SESSION_ID
+        self.codegen_session_id = CODEGEN_SESSION_ID
+
+    async def setup_sessions(self):
+        """Initializes the persistent sessions for the agents."""
+        await self.session_service_conv.create_session(
+            app_name=self.app_name, user_id=self.user_id, session_id=self.session_id
+        )
+        await self.session_service_codegen.create_session(
+            app_name=self.app_name, user_id=self.user_id, session_id=self.codegen_session_id
+        )
+
+    async def run(self):
+        """Executes the main application logic and orchestrates the agent flow."""
+        await self.setup_sessions()
+        print("Agent will start the conversation...")
+        user_input = None
+        final_prompt = None
+
+        while True:
+            # -------- Clarification Loop --------
+            while True:
+                agent_response = await self.agent_runner.send_message(
+                    self.conversation_agent,
+                    self.session_id,
+                    self.user_id,
+                    f"User says: '{user_input}'"
+                    if user_input
+                    else "Start the conversation and ask what the user wants to create. "
+                         "Ask clarifying questions as needed. When ready, produce the final prompt "
+                         "for code generation using  FINAL_PROMPT: ",
+                )
+                print("Agent:", agent_response)
+
+                if "FINAL_PROMPT:" in agent_response:
+                    final_prompt = agent_response.replace("FINAL_PROMPT:", "").strip()
+                    break
+                else:
+                    user_input = input("You: ")
+
+            # -------- CodeGen Loop --------
+            code_result = await self.agent_runner_codegen.send_message(
+                self.code_generator_agent,
+                self.codegen_session_id,
+                self.user_id,
+                final_prompt,
+            )
+            print("\nCodeGen Result:\n", code_result)
+
+            # Accept / Reject flow
+            print("Agent: Do you accept this code or reject it?")
+            user_choice = input("You (Accept/Reject): ").strip().lower()
+
+            if user_choice == "accept":
+                print("✅ Code accepted. Flow finished.")
+                break
+            else:
+                user_input = input("Provide a revised description or prompt: ")
+                final_prompt = None  # reset so clarification loop starts again
 
 
 async def main():
-    # Create persistent sessions (one for conv, one for codegen)
-    session_service_conv = InMemorySessionService()
-    session_service_codegen = InMemorySessionService()
+    orchestrator = AppOrchestrator(APP_NAME, USER_ID)
+    await orchestrator.run()
 
-    await session_service_conv.create_session(app_name=APP_NAME,
-                                              user_id=USER_ID,
-                                              session_id=SESSION_ID)
-    await session_service_codegen.create_session(app_name=APP_NAME,
-                                                 user_id=USER_ID,
-                                                 session_id=CODEGEN_SESSION_ID)
 
-    print("Agent will start the conversation...")
-
-    user_input = None
-    final_prompt = None
-
-    while True:
-        # -------- Clarification Loop --------
-        while True:
-            agent_response = await send_to_agent(
-                conversation_agent,
-                session_service_conv,
-                SESSION_ID,
-                f"User says: '{user_input}'"
-                if user_input
-                else "Start the conversation and ask what the user wants to create. "
-                     "Ask clarifying questions as needed. When ready, produce the final prompt "
-                     "for code generation using FINAL_PROMPT: "
-            )
-            print("Agent:", agent_response)
-
-            if "FINAL_PROMPT:" in agent_response:
-                final_prompt = agent_response.replace(
-                    "FINAL_PROMPT:", "").strip()
-                break
-            else:
-                user_input = input("You: ")
-
-        # -------- CodeGen Loop --------
-        code_result = await send_to_agent(
-            code_generator_agent,
-            session_service_codegen,
-            CODEGEN_SESSION_ID,
-            final_prompt
-        )
-        print("\nCodeGen Result:\n", code_result)
-
-        # Accept / Reject flow
-        print("Agent: Do you accept this code or reject it?")
-        user_choice = input("You (Accept/Reject): ").strip().lower()
-
-        if user_choice == "accept":
-            print("✅ Code accepted. Flow finished.")
-            break
-        else:
-            user_input = input("Provide a revised description or prompt: ")
-            final_prompt = None  # reset so clarification loop starts again
-
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
